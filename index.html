@@ -151,7 +151,6 @@
     }
   }
 
-  // タイマー開始
   function startTimer() {
     // 入力チェック
     const totalMin = Math.max(1, parseInt(totalMinutesInput.value, 10) || 1);
@@ -166,35 +165,40 @@
     // audio の初期化（ユーザー操作として）
     ensureAudioContext();
     if (audioCtx.state === 'suspended') {
-      // 一部ブラウザでは明示的に resume が必要
       audioCtx.resume().catch(()=>{ /* ignore */ });
     }
 
-    if (!startTime) {
-      // 初回開始
-      startTime = Date.now();
-      lastElapsedMinutes = -1;
-      pausedAt = null;
-    } else if (pausedAt !== null) {
-      // 一時停止から再開：startTime を補正
-      const now = Date.now();
-      // pausedAtは経過ミリ秒で保持している
-      startTime = now - pausedAt;
-      pausedAt = null;
-    }
-
-    // 1秒ごとに更新（内部では Date.now() を使い正確にする）
-    if (!timerIntervalId) {
-      timerIntervalId = setInterval(updateDisplays, 1000);
-      updateDisplays(); // 即時更新
-    }
-
+    // 1分間待機してからタイマーを本格開始
+    logMsg('1分待機中…');
     startBtn.disabled = true;
-    pauseBtn.disabled = false;
-    resetBtn.disabled = false;
+    pauseBtn.disabled = true; // 待機中は一時停止不可
 
-    logMsg('開始しました');
+    setTimeout(() => {
+      logMsg('開始しました');
+
+      if (!startTime) {
+        // 初回開始
+        startTime = Date.now();
+        lastElapsedMinutes = -1;
+        pausedAt = null;
+      } else if (pausedAt !== null) {
+        // 一時停止から再開：startTime を補正
+        const now = Date.now();
+        startTime = now - pausedAt;
+        pausedAt = null;
+      }
+
+      // 1秒ごとに更新
+      if (!timerIntervalId) {
+        timerIntervalId = setInterval(updateDisplays, 1000);
+        updateDisplays(); // 即時更新
+      }
+
+      pauseBtn.disabled = false;
+      resetBtn.disabled = false;
+    }, 60 * 1000); // 1分 = 60秒 = 60000ミリ秒
   }
+
 
   // 一時停止
   function pauseTimer() {
