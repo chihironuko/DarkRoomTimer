@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>シングルページ タイマー（ビープ）</title>
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif; padding: 24px; max-width:720px; margin:auto; }
+  h1 { margin-bottom: 8px; }
+  label { display:block; margin-top:12px; }
+  input[type="number"] { width:120px; padding:6px; font-size:16px; }
+  .controls { margin-top:16px; }
+  button { padding:8px 12px; margin-right:8px; font-size:15px; }
+  #status { margin-top:18px; font-size:18px; }
+  #log { margin-top:12px; max-height:160px; overflow:auto; background:#f8f8f8; padding:8px; border-radius:6px; font-size:13px; }
+  .small { font-size:13px; color:#666; }
+</style>
+</head>
+<body>
+  <h1>タイマー（ビープ）</h1>
+  <div class="small">総経過時間とビープ間隔を分で指定。ビープは「経過した分数」と同じ回数鳴ります。</div>
+
+  <form id="form" onsubmit="return false;">
+    <label>
+      総経過時間（分）:
+      <input type="number" id="totalMinutes" value="5" min="1" required>
+    </label>
+
+    <label>
+      ビープ間隔（分）:
+      <input type="number" id="beepSpan" value="1" min="1" required>
+    </label>
+
+    <div class="controls">
+      <button id="startBtn" type="button">開始</button>
+      <button id="pauseBtn" type="button" disabled>一時停止</button>
+      <button id="resetBtn" type="button" disabled>リセット</button>
+    </div>
+  </form>
+
+  <div id="status">
+    <div>経過: <span id="elapsedDisplay">0分0秒</span></div>
+    <div>残り: <span id="remainingDisplay">-</span></div>
+    <div id="nextBeepInfo" class="small">次のビープ: -</div>
+  </div>
+
+  <div id="log"></div>
+
+<script>
+(() => {
+  // 要素参照
+  const totalMinutesInput = document.getElementById('totalMinutes');
+  const beepSpanInput = document.getElementById('beepSpan');
+  const startBtn = document.getElementById('startBtn');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const elapsedDisplay = document.getElementById('elapsedDisplay');
+  const remainingDisplay = document.getElementById('remainingDisplay');
+  const nextBeepInfo = document.getElementById('nextBeepInfo');
+  const log = document.getElementById('log');
+
+  // タイミング管理
+  let timerIntervalId = null; // 1秒更新用
+  let startTime = null;       // Date.now() ms
+  let pausedAt = null;        // 経過ミリ秒（pause時）
+  let totalMillis = 0;
+  let lastElapsedMinutes = 0;
+  let audioCtx = null;
+
+  function logMsg(msg) {
+    const t = new Date().toLocaleTimeString();
+    log.insertAdjacentHTML('afterbegin', `<div>[${t}] ${msg}</div>`);
+  }
+
+  // AudioContext の初期化はユーザー操作時に行う（自動再生ポリシー対策）
+  function ensureAudioContext() {
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+  }
+
+  // 単一の短いビープ音
+  function singleBeepAt(timeOffsetSec) {
+    // timeOffsetSec: audioCtx.currentTime からのオフセット（秒）
+    const dur = 0.18;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(880, audioCtx.currentTime + timeOffsetSec); // 880Hz
+    gain.gain.setValueAtTime(0.001, audioCtx.currentTime + timeOffsetSec); // 微小に開始してすぐ上げる（クリックを抑える）
+    gain.gain.linearRampToValueAtTime(0.12, audioCtx.currentTime + timeOffsetSec + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + timeOffsetSec + dur);
+
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+
+    osc.start(audioCtx.currentTime + timeOffsetSec);
+    osc.stop(audioCtx.currentTime + timeOffsetSec + dur + 0.01);
+  }
+
+  // 指定回数分ビープを順に鳴らす（間隔は beepGapSec）
+  function beepMultiple(times, beepGapSec = 0.35) {
+    if (!times || times <= 0) return;
+    ensureAudioContext();
+    // safety cap: あまりに大きい回数だと不快なので、極端な場合は分割して鳴らす（ただし仕様は変えない）
+    // ここでは制限は入れず、ユーザー指定どおり鳴らす（もし60分なら60回鳴る）
+    for (let i = 0; i < times; i++) {
+      singleBeepAt(i * beepGapSec);
+    }
+  }
+
+  function formatDuration(ms) {
+    const totalSec = Math.max(0, Math.floor(ms / 1000));
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    return `${m}分${s}秒`;
+  }
+
+  function updateDisplays() {
+    const now = Date.now();
+    const elapsedMs = (startTime !== null) ? (now - startTime) : (pausedAt || 0);
+    const remainingMs = Math.max(0, totalMillis - elapsedMs);
+    const elapsedMinutes = Math.floor(elapsedMs / 60000);
+    const elapsedSeconds = Math.floor((elapsedMs % 60000) / 1000);
+
+    elapsedDisplay.textContent = `${elapsedMinutes}分${elapsedSeconds}秒`;
+    remainingDisplay.textContent = formatDuration(remainingMs);
+
+    // 次のビープまでの分数表示（beepSpanに合わせる）
+    const beepSpan = Math.max(1, parseInt(beepSpanInput.value, 10) || 1);
+    const nextBeepInMinutes = beepSpan - (elapsedMinutes % beepSpan);
+    const nextBeepAt = elapsedMinutes % beepSpan === 0 ? 0 : nextBeepInMinutes;
+    nextBeepInfo.textContent = `次のビープは ${ (elapsedMinutes % beepSpan === 0) ? '直前（今が該当）' : nextBeepInMinutes + ' 分以内'} に来ます（経過 ${elapsedMinutes} 分）.`;
+
+    // ビープ判定（elapsedMinutes が増えた時点で判定）
+    if (elapsedMinutes > lastElapsedMinutes) {
+      lastElapsedMinutes = elapsedMinutes;
+      // beepSpanが成立するときにビープ。0分の瞬間はスキップ（開始直後の0分）。
+      if (elapsedMinutes > 0 && (elapsedMinutes % beepSpan === 0)) {
+        logMsg(`${elapsedMinutes}分経過 → ${elapsedMinutes} 回ビープします`);
+        // 鳴らす回数 = elapsedMinutes
+        beepMultiple(elapsedMinutes);
+      }
+    }
+
+    // 終了判定
+    if (elapsedMs >= totalMillis) {
+      stopTimer(false); // 終了（resetはしない）
+      logMsg('総経過時間に到達しました。');
+    }
+  }
+
+  // タイマー開始
+  function startTimer() {
+    // 入力チェック
+    const totalMin = Math.max(1, parseInt(totalMinutesInput.value, 10) || 1);
+    const beepSpan = Math.max(1, parseInt(beepSpanInput.value, 10) || 1);
+
+    totalMinutesInput.value = totalMin;
+    beepSpanInput.value = beepSpan;
+
+    // 総ミリ秒を計算
+    totalMillis = totalMin * 60 * 1000;
+
+    // audio の初期化（ユーザー操作として）
+    ensureAudioContext();
+    if (audioCtx.state === 'suspended') {
+      // 一部ブラウザでは明示的に resume が必要
+      audioCtx.resume().catch(()=>{ /* ignore */ });
+    }
+
+    if (!startTime) {
+      // 初回開始
+      startTime = Date.now();
+      lastElapsedMinutes = -1;
+      pausedAt = null;
+    } else if (pausedAt !== null) {
+      // 一時停止から再開：startTime を補正
+      const now = Date.now();
+      // pausedAtは経過ミリ秒で保持している
+      startTime = now - pausedAt;
+      pausedAt = null;
+    }
+
+    // 1秒ごとに更新（内部では Date.now() を使い正確にする）
+    if (!timerIntervalId) {
+      timerIntervalId = setInterval(updateDisplays, 1000);
+      updateDisplays(); // 即時更新
+    }
+
+    startBtn.disabled = true;
+    pauseBtn.disabled = false;
+    resetBtn.disabled = false;
+
+    logMsg('開始しました');
+  }
+
+  // 一時停止
+  function pauseTimer() {
+    if (!timerIntervalId) return;
+    clearInterval(timerIntervalId);
+    timerIntervalId = null;
+    // 経過ミリ秒を pausedAt に保存
+    pausedAt = Date.now() - startTime;
+    startTime = null;
+    startBtn.disabled = false;
+    pauseBtn.disabled = true;
+    resetBtn.disabled = false;
+    logMsg('一時停止しました');
+  }
+
+  // 停止（終了または手動リセット）。引数 reset が true の場合、表示を初期化
+  function stopTimer(reset = true) {
+    if (timerIntervalId) {
+      clearInterval(timerIntervalId);
+      timerIntervalId = null;
+    }
+    if (reset) {
+      startTime = null;
+      pausedAt = null;
+      lastElapsedMinutes = 0;
+      elapsedDisplay.textContent = '0分0秒';
+      remainingDisplay.textContent = '-';
+      nextBeepInfo.textContent = '-';
+      startBtn.disabled = false;
+      pauseBtn.disabled = true;
+      resetBtn.disabled = true;
+      logMsg('リセットしました');
+    } else {
+      // 終了時は startBtn を有効にして pause を無効にする
+      startBtn.disabled = false;
+      pauseBtn.disabled = true;
+      resetBtn.disabled = false;
+      // keep displays as-is (finished)
+    }
+  }
+
+  // リセットボタン
+  function resetAll() {
+    stopTimer(true);
+  }
+
+  // イベント
+  startBtn.addEventListener('click', () => {
+    startTimer();
+  });
+  pauseBtn.addEventListener('click', () => {
+    pauseTimer();
+  });
+  resetBtn.addEventListener('click', () => {
+    resetAll();
+  });
+
+  // 初期表示
+  resetAll();
+
+  // キーボードで Enter を押したら開始（フォーム内）
+  document.getElementById('form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    startTimer();
+  });
+
+  // ページ離脱時に AudioContext をクローズしておく（任意）
+  window.addEventListener('beforeunload', () => {
+    if (audioCtx && audioCtx.state !== 'closed') {
+      try { audioCtx.close(); } catch (e) {}
+    }
+  });
+})();
+</script>
+</body>
+</html>
