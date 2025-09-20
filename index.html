@@ -45,10 +45,9 @@
   </div>
 
   <div id="log"></div>
-
 <script>
 (() => {
-  // 要素参照
+  // 要素参照（省略）
   const totalMinutesInput = document.getElementById('totalMinutes');
   const beepSpanInput = document.getElementById('beepSpan');
   const startBtn = document.getElementById('startBtn');
@@ -59,36 +58,53 @@
   const nextBeepInfo = document.getElementById('nextBeepInfo');
   const log = document.getElementById('log');
 
-  // タイミング管理
-  let timerIntervalId = null; // 1秒更新用
-  let startTime = null;       // Date.now() ms
-  let pausedAt = null;        // 経過ミリ秒（pause時）
+  let timerIntervalId = null;
+  let startTime = null;
+  let pausedAt = null;
   let totalMillis = 0;
   let lastElapsedMinutes = 0;
   let audioCtx = null;
+  let gongBuffer = null; // ← gong音のキャッシュ
 
   function logMsg(msg) {
     const t = new Date().toLocaleTimeString();
     log.insertAdjacentHTML('afterbegin', `<div>[${t}] ${msg}</div>`);
   }
 
-  // AudioContext の初期化はユーザー操作時に行う（自動再生ポリシー対策）
   function ensureAudioContext() {
     if (!audioCtx) {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     }
   }
 
+  // gong.wav を読み込んでキャッシュ
+  async function loadGong() {
+    if (!audioCtx) ensureAudioContext();
+    if (gongBuffer) return gongBuffer;
+    const res = await fetch('gong.wav');
+    const arrayBuffer = await res.arrayBuffer();
+    gongBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+    return gongBuffer;
+  }
+
+  // gong.wav を再生
+  function playGong() {
+    if (!gongBuffer) return;
+    const src = audioCtx.createBufferSource();
+    src.buffer = gongBuffer;
+    src.connect(audioCtx.destination);
+    src.start();
+  }
+
   // 単一の短いビープ音
   function singleBeepAt(timeOffsetSec) {
-    // timeOffsetSec: audioCtx.currentTime からのオフセット（秒）
     const dur = 0.18;
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
 
     osc.type = 'sine';
-    osc.frequency.setValueAtTime(880, audioCtx.currentTime + timeOffsetSec); // 880Hz
-    gain.gain.setValueAtTime(0.001, audioCtx.currentTime + timeOffsetSec); // 微小に開始してすぐ上げる（クリックを抑える）
+    osc.frequency.setValueAtTime(880, audioCtx.currentTime + timeOffsetSec);
+    gain.gain.setValueAtTime(0.001, audioCtx.currentTime + timeOffsetSec);
     gain.gain.linearRampToValueAtTime(0.12, audioCtx.currentTime + timeOffsetSec + 0.01);
     gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + timeOffsetSec + dur);
 
@@ -99,12 +115,9 @@
     osc.stop(audioCtx.currentTime + timeOffsetSec + dur + 0.01);
   }
 
-  // 指定回数分ビープを順に鳴らす（間隔は beepGapSec）
   function beepMultiple(times, beepGapSec = 0.35) {
     if (!times || times <= 0) return;
     ensureAudioContext();
-    // safety cap: あまりに大きい回数だと不快なので、極端な場合は分割して鳴らす（ただし仕様は変えない）
-    // ここでは制限は入れず、ユーザー指定どおり鳴らす（もし60分なら60回鳴る）
     for (let i = 0; i < times; i++) {
       singleBeepAt(i * beepGapSec);
     }
@@ -127,88 +140,72 @@
     elapsedDisplay.textContent = `${elapsedMinutes}分${elapsedSeconds}秒`;
     remainingDisplay.textContent = formatDuration(remainingMs);
 
-    // 次のビープまでの分数表示（beepSpanに合わせる）
     const beepSpan = Math.max(1, parseInt(beepSpanInput.value, 10) || 1);
     const nextBeepInMinutes = beepSpan - (elapsedMinutes % beepSpan);
-    const nextBeepAt = elapsedMinutes % beepSpan === 0 ? 0 : nextBeepInMinutes;
     nextBeepInfo.textContent = `次のビープは ${ (elapsedMinutes % beepSpan === 0) ? '直前（今が該当）' : nextBeepInMinutes + ' 分以内'} に来ます（経過 ${elapsedMinutes} 分）.`;
 
-    // ビープ判定（elapsedMinutes が増えた時点で判定）
     if (elapsedMinutes > lastElapsedMinutes) {
       lastElapsedMinutes = elapsedMinutes;
-      // beepSpanが成立するときにビープ。0分の瞬間はスキップ（開始直後の0分）。
       if (elapsedMinutes > 0 && (elapsedMinutes % beepSpan === 0)) {
         logMsg(`${elapsedMinutes}分経過 → ${elapsedMinutes} 回ビープします`);
-        // 鳴らす回数 = elapsedMinutes
         beepMultiple(elapsedMinutes);
       }
     }
 
-    // 終了判定
     if (elapsedMs >= totalMillis) {
-      stopTimer(false); // 終了（resetはしない）
+      stopTimer(false);
       logMsg('総経過時間に到達しました。');
     }
   }
 
   function startTimer() {
-    // 入力チェック
     const totalMin = Math.max(1, parseInt(totalMinutesInput.value, 10) || 1);
     const beepSpan = Math.max(1, parseInt(beepSpanInput.value, 10) || 1);
 
     totalMinutesInput.value = totalMin;
     beepSpanInput.value = beepSpan;
-
-    // 総ミリ秒を計算
     totalMillis = totalMin * 60 * 1000;
 
-    // audio の初期化（ユーザー操作として）
     ensureAudioContext();
     if (audioCtx.state === 'suspended') {
-      audioCtx.resume().catch(()=>{ /* ignore */ });
+      audioCtx.resume().catch(()=>{});
     }
 
-    // 1分間待機してからタイマーを本格開始
-    logMsg('1分待機中…');
-    startBtn.disabled = true;
-    pauseBtn.disabled = true; // 待機中は一時停止不可
+    // gong を事前にロード
+    loadGong().then(() => {
+      logMsg('1分待機中…');
+      startBtn.disabled = true;
+      pauseBtn.disabled = true;
 
-    setTimeout(() => {
-      logMsg('開始しました');
-      // ここで gong.mp3 を再生
-      const gongAudio = new Audio('gong.wav');
-      gongAudio.play().catch(e => console.log('再生エラー', e));
+      setTimeout(() => {
+        logMsg('開始しました');
+        playGong(); // ← AudioContext 経由で鳴らす
 
-      if (!startTime) {
-        // 初回開始
-        startTime = Date.now();
-        lastElapsedMinutes = -1;
-        pausedAt = null;
-      } else if (pausedAt !== null) {
-        // 一時停止から再開：startTime を補正
-        const now = Date.now();
-        startTime = now - pausedAt;
-        pausedAt = null;
-      }
+        if (!startTime) {
+          startTime = Date.now();
+          lastElapsedMinutes = -1;
+          pausedAt = null;
+        } else if (pausedAt !== null) {
+          const now = Date.now();
+          startTime = now - pausedAt;
+          pausedAt = null;
+        }
 
-      // 1秒ごとに更新
-      if (!timerIntervalId) {
-        timerIntervalId = setInterval(updateDisplays, 1000);
-        updateDisplays(); // 即時更新
-      }
+        if (!timerIntervalId) {
+          timerIntervalId = setInterval(updateDisplays, 1000);
+          updateDisplays();
+        }
 
-      pauseBtn.disabled = false;
-      resetBtn.disabled = false;
-    }, 60 * 1000); // 1分 = 60秒 = 60000ミリ秒
+        pauseBtn.disabled = false;
+        resetBtn.disabled = false;
+      }, 60000);
+    });
   }
 
-
-  // 一時停止
   function pauseTimer() {
     if (!timerIntervalId) return;
     clearInterval(timerIntervalId);
     timerIntervalId = null;
-    // 経過ミリ秒を pausedAt に保存
     pausedAt = Date.now() - startTime;
     startTime = null;
     startBtn.disabled = false;
@@ -217,7 +214,6 @@
     logMsg('一時停止しました');
   }
 
-  // 停止（終了または手動リセット）。引数 reset が true の場合、表示を初期化
   function stopTimer(reset = true) {
     if (timerIntervalId) {
       clearInterval(timerIntervalId);
@@ -235,20 +231,16 @@
       resetBtn.disabled = true;
       logMsg('リセットしました');
     } else {
-      // 終了時は startBtn を有効にして pause を無効にする
       startBtn.disabled = false;
       pauseBtn.disabled = true;
       resetBtn.disabled = false;
-      // keep displays as-is (finished)
     }
   }
 
-  // リセットボタン
   function resetAll() {
     stopTimer(true);
   }
 
-  // イベント
   startBtn.addEventListener('click', () => {
     startTimer();
   });
@@ -259,16 +251,13 @@
     resetAll();
   });
 
-  // 初期表示
   resetAll();
 
-  // キーボードで Enter を押したら開始（フォーム内）
   document.getElementById('form').addEventListener('submit', (e) => {
     e.preventDefault();
     startTimer();
   });
 
-  // ページ離脱時に AudioContext をクローズしておく（任意）
   window.addEventListener('beforeunload', () => {
     if (audioCtx && audioCtx.state !== 'closed') {
       try { audioCtx.close(); } catch (e) {}
