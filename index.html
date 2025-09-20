@@ -175,6 +175,9 @@
 
     setTimeout(() => {
       logMsg('開始しました');
+      // ここで gong.mp3 を再生
+      const gongAudio = new Audio('gong.wav');
+      gongAudio.play().catch(e => console.log('再生エラー', e));
 
       if (!startTime) {
         // 初回開始
